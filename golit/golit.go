@@ -6,6 +6,7 @@ package golit
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -72,8 +73,10 @@ type Lit[T any] struct {
 	file    *File
 	exprs   map[string]ast.Expr
 	sp      Spellings
-	// name is the var read, "" for an expression.
+	// name is the var read, "" for an expression, and find finds the literal in a file, nil
+	// for an expression read alone.
 	name string
+	find func(*File) (ast.Expr, bool)
 }
 
 // Opaque are the paths whose values aren't spelled in a way the codec reads, sorted. Their
@@ -129,6 +132,9 @@ type Helper struct {
 	// Label is what an editor shows it as, and Args name its arguments.
 	Label string
 	Args  []string
+	// Hex is how many hex digits its whole-number arguments are written with, as a color's
+	// are (RGB(0x00ff80)); 0 writes them in decimal.
+	Hex int
 }
 
 // Call makes a helper's value from its arguments, for an editor that changed one.
@@ -261,12 +267,24 @@ func Read[T any](src []byte, name string, built T, sp Spellings) (*Lit[T], error
 
 // ReadVar is Read of a parsed file.
 func ReadVar[T any](f *File, name string, built T, sp Spellings) (*Lit[T], error) {
-	e, ok := f.Var(name)
-	if !ok {
+	l, err := ReadAt(f, func(f *File) (ast.Expr, bool) { return f.Var(name) }, built, sp)
+	if err != nil {
 		return nil, fmt.Errorf("no var %s in the source", name)
 	}
-	l := ReadExpr(f, e, built, sp)
 	l.name = name
+	return l, nil
+}
+
+// ReadAt decodes the expression find finds in a parsed file, as ReadVar does a var's. A
+// literal no var holds alone (a list passed to a function) read so can be written back,
+// find finding it again in the source written.
+func ReadAt[T any](f *File, find func(*File) (ast.Expr, bool), built T, sp Spellings) (*Lit[T], error) {
+	e, ok := find(f)
+	if !ok {
+		return nil, errors.New("the literal isn't in the source")
+	}
+	l := ReadExpr(f, e, built, sp)
+	l.find = find
 	return l, nil
 }
 

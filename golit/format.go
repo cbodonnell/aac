@@ -72,7 +72,7 @@ func newWriter(f *File, pkg string, sp Spellings) *writer {
 func Format[T any](v T, pkg string, sp Spellings, spelled map[string]Spelling) (string, map[string]string, error) {
 	w := newWriter(nil, pkg, sp)
 	w.spelled = spelled
-	text, err := w.format(reflect.ValueOf(&v).Elem(), "", false, false, 0)
+	text, err := w.format(reflect.ValueOf(&v).Elem(), "", false, layout{}, 0)
 	return text, w.used, err
 }
 
@@ -216,14 +216,21 @@ func fieldOf(s reflect.Value, i int) reflect.Value {
 	return readable(s, sf)
 }
 
+// layout is how a composite value is laid out: one element a line, inline when it fits,
+// or neither, as the codec writes its type alone; and a struct by position, every field
+// written in order.
+type layout struct {
+	lines, inline, positional bool
+}
+
 // format writes a value at a path: as spelled there, or plainly. elided leaves out a
-// composite literal's type, as an element of a list or map may. lines writes a composite
-// one element per line. indent is the columns the value starts in.
-func (w *writer) format(v reflect.Value, path string, elided, lines bool, indent int) (string, error) {
+// composite literal's type, as an element of a list or map may. lay lays out a composite
+// value itself, not what is in it. indent is the columns the value starts in.
+func (w *writer) format(v reflect.Value, path string, elided bool, lay layout, indent int) (string, error) {
 	if s, ok := w.spelled[path]; ok && s.Kind != Plain {
 		return w.spell(s, v, path, indent)
 	}
-	return w.plain(v, path, elided, lines, indent)
+	return w.plain(v, path, elided, lay, indent)
 }
 
 // spell writes a value as a spelling says.
@@ -235,21 +242,29 @@ func (w *writer) spell(s Spelling, v reflect.Value, path string, indent int) (st
 				return w.qualify(c.Type.PkgPath(), c.Pkg) + s.Name, nil
 			}
 		}
-		return w.plain(v, path, false, false, indent)
+		return w.plain(v, path, false, layout{}, indent)
 	case Var:
 		if _, ok := w.sp.Vars[s.Name]; !ok {
 			return "", fmt.Errorf("%s: no var %s", path, s.Name)
 		}
 		return s.Name, nil
 	case Call:
+		hex := w.sp.Helpers[s.Name].Hex
 		args := make([]string, len(s.Args))
 		for i, a := range s.Args {
 			av := reflect.ValueOf(a)
-			if !av.IsValid() {
+			switch {
+			case !av.IsValid():
 				args[i] = "nil"
 				continue
+			case hex > 0 && av.CanUint():
+				args[i] = fmt.Sprintf("0x%0*x", hex, av.Uint())
+				continue
+			case hex > 0 && av.CanInt() && av.Int() >= 0:
+				args[i] = fmt.Sprintf("0x%0*x", hex, av.Int())
+				continue
 			}
-			text, err := w.format(av, path+"("+strconv.Itoa(i)+")", false, false, indent)
+			text, err := w.format(av, path+"("+strconv.Itoa(i)+")", false, layout{}, indent)
 			if err != nil {
 				return "", err
 			}
@@ -262,11 +277,11 @@ func (w *writer) spell(s Spelling, v reflect.Value, path string, indent int) (st
 		}
 		return s.Source, nil
 	}
-	return w.plain(v, path, false, false, indent)
+	return w.plain(v, path, false, layout{}, indent)
 }
 
 // plain writes a value as the codec writes it alone.
-func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent int) (string, error) {
+func (w *writer) plain(v reflect.Value, path string, elided bool, lay layout, indent int) (string, error) {
 	if v.Type() == rawType {
 		return v.String(), nil
 	}
@@ -276,6 +291,9 @@ func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent 
 	t := v.Type()
 	switch t {
 	case pointType:
+		if elided {
+			return fmt.Sprintf("{%d, %d}", v.Field(0).Int(), v.Field(1).Int()), nil
+		}
 		return w.qualify("image", "image") + fmt.Sprintf("Pt(%d, %d)", v.Field(0).Int(), v.Field(1).Int()), nil
 	case nrgbaType:
 		c := interfaceOf(v).(color.NRGBA)
@@ -303,7 +321,7 @@ func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent 
 		if t.Elem().Kind() != reflect.Struct {
 			return "", fmt.Errorf("%s: a %s isn't written", path, t)
 		}
-		body, err := w.composite(v.Elem(), path, lines, indent)
+		body, err := w.composite(v.Elem(), path, lay, indent)
 		if err != nil || elided {
 			return body, err
 		}
@@ -316,23 +334,23 @@ func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent 
 		switch e.Kind() {
 		case reflect.Struct, reflect.Slice, reflect.Array, reflect.Map:
 			if e.Type() == pointType {
-				return w.plain(e, path, false, lines, indent)
+				return w.plain(e, path, false, lay, indent)
 			}
-			body, err := w.composite(e, path, lines, indent)
+			body, err := w.composite(e, path, lay, indent)
 			if err != nil {
 				return "", err
 			}
 			return w.literalType(e.Type()) + body, nil
 		case reflect.Pointer:
 			if !e.IsNil() && e.Elem().Kind() == reflect.Struct {
-				body, err := w.composite(e.Elem(), path, lines, indent)
+				body, err := w.composite(e.Elem(), path, lay, indent)
 				if err != nil {
 					return "", err
 				}
 				return "&" + w.literalType(e.Elem().Type()) + body, nil
 			}
 		}
-		text, err := w.plain(e, path, false, lines, indent)
+		text, err := w.plain(e, path, false, lay, indent)
 		if err != nil {
 			return "", err
 		}
@@ -346,7 +364,7 @@ func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent 
 	case k == reflect.Slice && v.IsNil(), k == reflect.Map && v.IsNil(), k == reflect.Func && v.IsNil():
 		return "nil", nil
 	case k == reflect.Struct, k == reflect.Slice, k == reflect.Array, k == reflect.Map:
-		body, err := w.composite(v, path, lines, indent)
+		body, err := w.composite(v, path, lay, indent)
 		if err != nil || elided {
 			return body, err
 		}
@@ -355,54 +373,69 @@ func (w *writer) plain(v reflect.Value, path string, elided, lines bool, indent 
 	return "", fmt.Errorf("%s: a %s isn't written plainly", path, t)
 }
 
-// composite writes a struct, list or map's braces and what is in them.
-func (w *writer) composite(v reflect.Value, path string, lines bool, indent int) (string, error) {
+// composite writes a struct, list or map's braces and what is in them: a struct by key,
+// its zero fields left out, or by position; a list of composite values or strings one
+// element a line, and of anything else, as names and calls, inline when it fits; a map one
+// entry a line. lay says otherwise.
+func (w *writer) composite(v reflect.Value, path string, lay layout, indent int) (string, error) {
 	t := v.Type()
 	var items []string
+	lines := lay.lines
 	switch t.Kind() {
 	case reflect.Struct:
 		for i := range t.NumField() {
 			sf := t.Field(i)
 			fv := fieldOf(v, i)
 			fpath := join(path, sf.Name)
-			if w.omit(fv, fpath) {
+			if !lay.positional && w.omit(fv, fpath) {
 				continue
 			}
 			if !sf.IsExported() && !w.local(t) {
 				return "", fmt.Errorf("%s: unexported outside its package", fpath)
 			}
-			text, err := w.format(fv, fpath, false, false, indent+TabWidth)
+			text, err := w.format(fv, fpath, false, layout{}, indent+TabWidth)
 			if err != nil {
 				return "", err
 			}
-			items = append(items, sf.Name+": "+text)
+			if !lay.positional {
+				text = sf.Name + ": " + text
+			}
+			items = append(items, text)
 		}
 	case reflect.Slice, reflect.Array:
 		for i := range v.Len() {
-			text, err := w.format(v.Index(i), index(path, strconv.Itoa(i)), true, false, indent+TabWidth)
+			text, err := w.format(v.Index(i), index(path, strconv.Itoa(i)), true, layout{}, indent+TabWidth)
 			if err != nil {
 				return "", err
 			}
 			items = append(items, text)
 		}
-		lines = lines || perLine(t.Elem())
+		if !lay.inline && perLine(t.Elem()) {
+			lines = lines || t.Elem().Kind() == reflect.String || slices.ContainsFunc(items, composed)
+		}
 	case reflect.Map:
 		keys := v.MapKeys()
 		sortKeys(keys)
 		for _, k := range keys {
-			key, err := w.plain(k, "", true, false, indent+TabWidth)
+			key, err := w.plain(k, "", true, layout{}, indent+TabWidth)
 			if err != nil {
 				return "", err
 			}
-			text, err := w.format(v.MapIndex(k), index(path, KeyPath(k, false)), true, false, indent+TabWidth)
+			text, err := w.format(v.MapIndex(k), index(path, KeyPath(k, false)), true, layout{}, indent+TabWidth)
 			if err != nil {
 				return "", err
 			}
 			items = append(items, key+": "+text)
 		}
-		lines = len(items) > 0
+		lines = lines || (!lay.inline && len(items) > 0)
 	}
 	return block(items, lines, indent), nil
+}
+
+// composed reports whether an element is written as a composite literal, not a name or a
+// call of names and numbers.
+func composed(text string) bool {
+	return strings.ContainsAny(text, "{\n")
 }
 
 // block is items in braces: inline when they fit and none spans lines, else one a line.

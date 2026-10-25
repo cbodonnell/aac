@@ -91,7 +91,7 @@ var edits = []struct {
 	{"field added", func(s *Shelf, _ map[string]Spelling, _ map[string][]int) {
 		s.Items[2].Price = 1
 		s.Items[0].Tags = []string{"new"}
-	}, []string{`{Name: "jar", Rule: func(n int) int { return n }, Extra: Note{"fragile"}, Price: 1}`, "Price: 2.5, Tags: []string{\n\t\t\t\"new\",\n\t\t}},"}, nil},
+	}, []string{`{Name: "jar", Price: 1, Rule: func(n int) int { return n }, Extra: Note{"fragile"}}`, "Price: 2.5, Tags: []string{\n\t\t\t\"new\",\n\t\t}},"}, nil},
 	{"element added", func(s *Shelf, _ map[string]Spelling, _ map[string][]int) {
 		s.Items = append(s.Items, Item{Name: "bowl", Color: ColorBlue, Extra: Note{"deep"}})
 	}, []string{"\t\t{Name: \"bowl\", Color: ColorBlue, Extra: Note{Text: \"deep\"}},\n\t},"}, nil},
@@ -407,7 +407,7 @@ var list = []Key{
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "\t{\"a\", 1},\n\t{Role: \"b\", Step: 2},\n}") {
+	if !strings.Contains(string(out), "\t{\"a\", 1},\n\t{\"b\", 2},\n}") {
 		t.Errorf("wrote\n%s", out)
 	}
 }

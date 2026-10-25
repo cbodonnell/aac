@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"maps"
 	"path"
 	"reflect"
 	"slices"
@@ -29,13 +30,26 @@ import (
 // origins gives, per list path of now, each element's index in the source's list, -1 for
 // one added; a list it leaves out keeps its elements by index. Elements kept are edited in
 // place, elements gone take their lines and comments, and elements added go after the
-// kept element before them, or first. Kept elements in another order than the source's
+// kept element before them, or first, in their siblings' style: one a line or inline, and
+// structs by position when theirs are. Kept elements in another order than the source's
 // trade places, each with its own edits.
 //
-// A field that changes to its zero value goes; one that changes from it is added at the end of its literal. Map entries are matched by key, and
-// new ones appended in sorted order. Packages written that the file doesn't import are
-// imported.
+// A field that changes to its zero value goes. One that changes from it is added in the
+// order the struct declares it in a literal on one line, so a field taken out and put back
+// is where it was; in one that spans lines, before the last field when that spans lines
+// (the list closing a struct) and otherwise at the end, or, when it spans lines itself,
+// after the last field that does too. Map entries are matched by key, and new ones appended in sorted order.
+// Packages written that the file doesn't import are imported.
 func (l *Lit[T]) Splices(now T, spelled map[string]Spelling, origins map[string][]int) ([]edit.Splice, error) {
+	w, err := l.splices(now, spelled, origins)
+	if err != nil {
+		return nil, err
+	}
+	return append(w.splices, w.importSplices()...), nil
+}
+
+// splices writes now over l, and is the writer holding the splices and the packages used.
+func (l *Lit[T]) splices(now T, spelled map[string]Spelling, origins map[string][]int) (*writer, error) {
 	w := newWriter(l.file, "", l.sp)
 	w.spelled, w.origins, w.was = spelled, origins, l.Spelled
 	e, ok := l.exprs[""]
@@ -47,32 +61,194 @@ func (l *Lit[T]) Splices(now T, spelled map[string]Spelling, origins map[string]
 	if err := w.walk(nv, ov, "", "", e, w.indentAt(e.Pos())); err != nil {
 		return nil, err
 	}
-	return append(w.splices, w.importSplices()...), nil
+	return w, nil
 }
 
 // Write is the source of l with now written in, formatted, and the literal read from it.
 // The result must read as now, spelled as spelled says, or Write fails. l must have been
-// read from a var.
+// read from a var, or by ReadAt.
 func (l *Lit[T]) Write(now T, spelled map[string]Spelling, origins map[string][]int) ([]byte, *Lit[T], error) {
+	c := &change[T]{l: l, now: now, spelled: spelled, origins: origins}
+	out, err := WriteAll(c)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, c.back, nil
+}
+
+// Change is a literal and the value to write over it, for WriteAll.
+type Change interface {
+	file() *File
+	write() (*writer, error)
+	readBack(*File) error
+}
+
+// Change is now to write over l, spelled and ordered as Splices takes them, for WriteAll.
+func (l *Lit[T]) Change(now T, spelled map[string]Spelling, origins map[string][]int) Change {
+	return &change[T]{l: l, now: now, spelled: spelled, origins: origins}
+}
+
+type change[T any] struct {
+	l       *Lit[T]
+	now     T
+	spelled map[string]Spelling
+	origins map[string][]int
+	back    *Lit[T]
+}
+
+func (c *change[T]) file() *File {
+	return c.l.file
+}
+
+func (c *change[T]) write() (*writer, error) {
+	if c.l.find == nil {
+		return nil, errors.New("only a literal read from a var, or by ReadAt, is written back")
+	}
+	return c.l.splices(c.now, c.spelled, c.origins)
+}
+
+func (c *change[T]) readBack(f *File) error {
+	back, err := ReadAt(f, c.l.find, c.now, c.l.sp)
+	if err != nil {
+		return fmt.Errorf("%s: %w", c.l.label(), err)
+	}
+	back.name = c.l.name
+	if err := c.l.readsAs(back, c.now, c.spelled); err != nil {
+		return fmt.Errorf("%s: the source written doesn't read back: %w", c.l.label(), err)
+	}
+	c.back = back
+	return nil
+}
+
+// label names a literal in an error.
+func (l *Lit[T]) label() string {
 	if l.name == "" {
-		return nil, nil, errors.New("only a var's literal is written back")
+		return "the literal"
 	}
-	splices, err := l.Splices(now, spelled, origins)
+	return l.name
+}
+
+// WriteAll writes several literals of one parsed file at once, as Write writes one: every
+// change's splices made and formatted together, and each literal read back as its value
+// and spellings, or nothing is written.
+func WriteAll(changes ...Change) ([]byte, error) {
+	if len(changes) == 0 {
+		return nil, errors.New("nothing to write")
+	}
+	f := changes[0].file()
+	var splices []edit.Splice
+	used := map[string]string{}
+	for _, c := range changes {
+		if c.file() != f {
+			return nil, errors.New("the literals written aren't of one parsed file")
+		}
+		w, err := c.write()
+		if err != nil {
+			return nil, err
+		}
+		splices = append(splices, w.splices...)
+		maps.Copy(used, w.used)
+	}
+	w := newWriter(f, "", Spellings{})
+	w.used = used
+	out, err := edit.Apply(f.Src, append(splices, w.importSplices()...))
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("the source written doesn't parse: %w", err)
 	}
-	out, err := edit.Apply(l.file.Src, splices)
+	back, err := Parse(out)
 	if err != nil {
-		return nil, nil, fmt.Errorf("the source written doesn't parse: %w", err)
+		return nil, err
 	}
-	back, err := Read(out, l.name, now, l.sp)
-	if err != nil {
-		return nil, nil, err
+	for _, c := range changes {
+		if err := c.readBack(back); err != nil {
+			return nil, err
+		}
 	}
-	if err := l.readsAs(back, now, spelled); err != nil {
-		return nil, nil, fmt.Errorf("%s: the source written doesn't read back: %w", l.name, err)
+	return out, nil
+}
+
+// Copy is the source of the value at path with now written over it, as Splices would
+// write it there, for a new element made from that one: its spellings, comments, style and
+// the fields it leaves out kept wherever now keeps them. spelled gives how paths of now are
+// spelled other than plainly, now itself being "". It reports the packages the copy names
+// that the file doesn't import, as Format does.
+func (l *Lit[T]) Copy(path string, now any, spelled map[string]Spelling) (string, map[string]string, error) {
+	e, ok := l.exprs[path]
+	if !ok {
+		return "", nil, fmt.Errorf("%s isn't written in the source", orWhole(path))
 	}
-	return out, back, nil
+	old, ok := valueAt(reflect.ValueOf(&l.Value).Elem(), path)
+	if !ok {
+		return "", nil, fmt.Errorf("no value at %s", orWhole(path))
+	}
+	nv := reflect.ValueOf(now)
+	if !nv.IsValid() || nv.Type() != old.Type() {
+		return "", nil, fmt.Errorf("%s is a %s, not a %T", orWhole(path), old.Type(), now)
+	}
+	w := newWriter(l.file, "", l.sp)
+	w.spelled, w.was = spelled, l.Spelled
+	text, err := w.moved(nv, old, "", path, e, w.indentAt(e.Pos()))
+	return text, w.used, err
+}
+
+// valueAt is the value at a path in v.
+func valueAt(v reflect.Value, path string) (reflect.Value, bool) {
+	for path != "" {
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return reflect.Value{}, false
+			}
+			v = v.Elem()
+		}
+		switch path[0] {
+		case '.':
+			path = path[1:]
+		case '[':
+			key := path[1:]
+			if q, err := strconv.QuotedPrefix(key); err == nil {
+				key = q
+			} else if end := strings.IndexByte(key, ']'); end >= 0 {
+				key = key[:end]
+			}
+			if !strings.HasPrefix(path[1+len(key):], "]") {
+				return reflect.Value{}, false
+			}
+			path = path[2+len(key):]
+			switch v.Kind() {
+			case reflect.Slice, reflect.Array:
+				i, err := strconv.Atoi(key)
+				if err != nil || i < 0 || i >= v.Len() {
+					return reflect.Value{}, false
+				}
+				v = v.Index(i)
+			case reflect.Map:
+				keys := v.MapKeys()
+				i := slices.IndexFunc(keys, func(k reflect.Value) bool {
+					return KeyPath(k, false) == key || KeyPath(k, true) == key
+				})
+				if i < 0 {
+					return reflect.Value{}, false
+				}
+				v = v.MapIndex(keys[i])
+			default:
+				return reflect.Value{}, false
+			}
+		default:
+			end := strings.IndexAny(path, ".[")
+			if end < 0 {
+				end = len(path)
+			}
+			if v.Kind() != reflect.Struct {
+				return reflect.Value{}, false
+			}
+			sf, ok := v.Type().FieldByName(path[:end])
+			if !ok || len(sf.Index) != 1 {
+				return reflect.Value{}, false
+			}
+			v, path = fieldOf(v, sf.Index[0]), path[end:]
+		}
+	}
+	return v, true
 }
 
 // readsAs reports how a literal read back from a write isn't what was written: its value,
@@ -257,7 +433,7 @@ func (w *writer) walk(now, old reflect.Value, path, src string, e ast.Expr, inde
 
 // replace writes a value over an expression.
 func (w *writer) replace(e ast.Expr, v reflect.Value, path string, indent int) error {
-	text, err := w.format(v, path, w.elidedAt(e), false, indent)
+	text, err := w.format(v, path, w.elidedAt(e), w.own(e), indent)
 	if err != nil {
 		return err
 	}
@@ -300,7 +476,11 @@ func (w *writer) structLit(lit *ast.CompositeLit, now, old reflect.Value, path, 
 		kv := elt.(*ast.KeyValueExpr)
 		kvs[kv.Key.(*ast.Ident).Name] = kv
 	}
-	var adds []string
+	type add struct {
+		field int
+		text  string
+	}
+	var adds []add
 	for i := range t.NumField() {
 		sf := t.Field(i)
 		nf, of := fieldOf(now, i), fieldOf(old, i)
@@ -322,33 +502,55 @@ func (w *writer) structLit(lit *ast.CompositeLit, now, old reflect.Value, path, 
 			if !sf.IsExported() && !w.local(t) {
 				return fmt.Errorf("%s: unexported outside its package", fpath)
 			}
-			text, err := w.format(nf, fpath, false, false, indent+TabWidth)
+			text, err := w.format(nf, fpath, false, layout{}, indent+TabWidth)
 			if err != nil {
 				return err
 			}
-			adds = append(adds, sf.Name+": "+text)
+			adds = append(adds, add{i, sf.Name + ": " + text})
 		}
 	}
 	if len(adds) == 0 {
 		return nil
 	}
-	var single, multi []string
-	for _, a := range adds {
-		if strings.Contains(a, "\n") {
-			multi = append(multi, a)
-		} else {
-			single = append(single, a)
-		}
-	}
 	if !w.spansLines(lit) || len(lit.Elts) == 0 {
-		w.splices = append(w.splices, w.insert(lit, nil, slices.Concat(single, multi), false)...)
+		// In the order declared: before the first field kept that the struct declares after.
+		var anchor ast.Expr
+		var items []string
+		flush := func() {
+			if len(items) > 0 {
+				w.splices = append(w.splices, w.insert(lit, anchor, items, false)...)
+			}
+			items = nil
+		}
+		for _, a := range adds {
+			var next ast.Expr
+			for j := a.field + 1; j < t.NumField() && next == nil; j++ {
+				if kv := kvs[t.Field(j).Name]; kv != nil && !w.gone(kv) {
+					next = kv
+				}
+			}
+			if next != anchor {
+				flush()
+				anchor = next
+			}
+			items = append(items, a.text)
+		}
+		flush()
 		return nil
 	}
+	var single, multi []string
+	for _, a := range adds {
+		if strings.Contains(a.text, "\n") {
+			multi = append(multi, a.text)
+		} else {
+			single = append(single, a.text)
+		}
+	}
 	if len(single) > 0 {
-		w.splices = append(w.splices, w.insert(lit, nil, single, true)...)
+		w.splices = append(w.splices, w.beforeLast(lit, single))
 	}
 	if len(multi) > 0 {
-		w.splices = append(w.splices, w.afterLists(lit, multi))
+		w.splices = append(w.splices, w.afterLast(lit, multi))
 	}
 	return nil
 }
@@ -415,7 +617,7 @@ func (w *writer) listLit(lit *ast.CompositeLit, now, old reflect.Value, path, sr
 			w.splices = append(w.splices, w.remove(e))
 		}
 	}
-	lines := len(elts) > 0 && w.spansLines(elts[len(elts)-1])
+	lay := w.siblings(elts, now.Type().Elem())
 	perLine := w.spansLines(lit) || (len(elts) == 0 && perLine(now.Type().Elem()))
 	// Elements added go before the kept element after them, in order.
 	var anchor ast.Expr
@@ -434,7 +636,7 @@ func (w *writer) listLit(lit *ast.CompositeLit, now, old reflect.Value, path, sr
 			anchor = elts[slots[j]]
 			continue
 		}
-		text, err := w.format(now.Index(k), index(path, strconv.Itoa(k)), true, lines, elemIndent)
+		text, err := w.format(now.Index(k), index(path, strconv.Itoa(k)), true, lay, elemIndent)
 		if err != nil {
 			return err
 		}
@@ -497,7 +699,11 @@ func (w *writer) mapLit(lit *ast.CompositeLit, now, old reflect.Value, path, src
 	sortKeys(keys)
 	seen := map[string]bool{}
 	var adds []string
-	lines := len(lit.Elts) > 0 && w.spansLines(lit.Elts[len(lit.Elts)-1].(*ast.KeyValueExpr).Value)
+	values := make([]ast.Expr, len(lit.Elts))
+	for i, elt := range lit.Elts {
+		values[i] = elt.(*ast.KeyValueExpr).Value
+	}
+	lay := w.siblings(values, now.Type().Elem())
 	for _, k := range keys {
 		kp := KeyPath(k, char)
 		p := index(path, kp)
@@ -508,14 +714,14 @@ func (w *writer) mapLit(lit *ast.CompositeLit, now, old reflect.Value, path, src
 			}
 			continue
 		}
-		key, err := w.plain(k, "", true, false, elemIndent)
+		key, err := w.plain(k, "", true, layout{}, elemIndent)
 		if err != nil {
 			return err
 		}
 		if char && k.CanInt() {
 			key = strconv.QuoteRune(rune(k.Int()))
 		}
-		text, err := w.format(now.MapIndex(k), p, true, lines, elemIndent)
+		text, err := w.format(now.MapIndex(k), p, true, lay, elemIndent)
 		if err != nil {
 			return err
 		}
@@ -585,23 +791,26 @@ func (w *writer) insert(lit *ast.CompositeLit, anchor ast.Expr, items []string, 
 // lastKept is the last element of a literal that no splice so far removes.
 func (w *writer) lastKept(lit *ast.CompositeLit) ast.Expr {
 	for i := len(lit.Elts) - 1; i >= 0; i-- {
-		e := lit.Elts[i]
-		from := edit.Offset(w.file.Fset, e.Pos())
-		gone := slices.ContainsFunc(w.splices, func(s edit.Splice) bool { return s.Text == "" && s.From <= from && s.To > from })
-		if !gone {
+		if e := lit.Elts[i]; !w.gone(e) {
 			return e
 		}
 	}
 	return nil
 }
 
-// afterLists inserts items into a literal after its last element that spans lines, so
-// gofmt doesn't align the elements around them.
-func (w *writer) afterLists(lit *ast.CompositeLit, items []string) edit.Splice {
+// gone reports whether a splice so far removes a node.
+func (w *writer) gone(n ast.Node) bool {
+	from := edit.Offset(w.file.Fset, n.Pos())
+	return slices.ContainsFunc(w.splices, func(s edit.Splice) bool { return s.Text == "" && s.From <= from && s.To > from })
+}
+
+// afterLast inserts items into a literal on lines of their own after its last element kept
+// that spans lines, so gofmt doesn't align the elements around them; or else at its end.
+func (w *writer) afterLast(lit *ast.CompositeLit, items []string) edit.Splice {
 	text := strings.Join(items, ",\n") + ",\n"
 	for i := len(lit.Elts) - 1; i >= 0; i-- {
 		e := lit.Elts[i]
-		if !w.spansLines(e) {
+		if !w.spansLines(e) || w.gone(e) {
 			continue
 		}
 		if nl := bytes.IndexByte(w.file.Src[edit.Offset(w.file.Fset, e.End()):], '\n'); nl >= 0 {
@@ -609,6 +818,58 @@ func (w *writer) afterLists(lit *ast.CompositeLit, items []string) edit.Splice {
 		}
 	}
 	return beforeBrace(w.file.Src, edit.Offset(w.file.Fset, lit.Rbrace), text, len(lit.Elts) > 0)
+}
+
+// beforeLast inserts items into a literal on lines of their own before its last element
+// kept when that spans lines and starts its line, as a list closing a struct does; or else
+// at its end.
+func (w *writer) beforeLast(lit *ast.CompositeLit, items []string) edit.Splice {
+	text := strings.Join(items, ",\n") + ",\n"
+	if last := w.lastKept(lit); last != nil && w.spansLines(last) {
+		at := edit.Offset(w.file.Fset, last.Pos())
+		start := bytes.LastIndexByte(w.file.Src[:at], '\n') + 1
+		if strings.TrimSpace(string(w.file.Src[start:at])) == "" {
+			return edit.Insert(start, text)
+		}
+	}
+	return beforeBrace(w.file.Src, edit.Offset(w.file.Fset, lit.Rbrace), text, len(lit.Elts) > 0)
+}
+
+// siblings is the layout of an element added among the values of a list or map: one a
+// line when the last of them spans lines, inline when it doesn't, and by position when they
+// are all struct literals by position.
+func (w *writer) siblings(values []ast.Expr, t reflect.Type) layout {
+	if len(values) == 0 {
+		return layout{}
+	}
+	lay := layout{lines: w.spansLines(values[len(values)-1])}
+	lay.inline = !lay.lines
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	lay.positional = t.Kind() == reflect.Struct && t != pointType && !slices.ContainsFunc(values, func(e ast.Expr) bool { return !byPosition(e) })
+	return lay
+}
+
+// own is the layout of a value written over an expression: the expression's, when it is
+// a composite literal.
+func (w *writer) own(e ast.Expr) layout {
+	if compositeOf(e) == nil {
+		return layout{}
+	}
+	lay := layout{lines: w.spansLines(e), positional: byPosition(e)}
+	lay.inline = !lay.lines
+	return lay
+}
+
+// byPosition reports whether an expression is a composite literal of elements not keyed.
+func byPosition(e ast.Expr) bool {
+	lit := compositeOf(e)
+	if lit == nil || len(lit.Elts) == 0 {
+		return false
+	}
+	_, keyed := lit.Elts[0].(*ast.KeyValueExpr)
+	return !keyed
 }
 
 // beforeBrace inserts lines before a closing brace at an offset: at the start of its line
