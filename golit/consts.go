@@ -81,62 +81,13 @@ func ConstsIn(dir string, t reflect.Type) (Consts, error) {
 // constants.
 func ReadConsts(t reflect.Type, srcs ...[]byte) (Consts, error) {
 	c := Consts{Type: t, values: map[string]reflect.Value{}}
-	type spec struct {
-		names []string
-		exprs []ast.Expr
-		iota  int
-		typed bool
+	pkg, specs, known, err := constSpecs(srcs...)
+	if err != nil {
+		return c, err
 	}
-	var specs []spec
-	for _, src := range srcs {
-		f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.SkipObjectResolution)
-		if err != nil {
-			return c, err
-		}
-		if c.Pkg == "" {
-			c.Pkg = f.Name.Name
-		}
-		for _, decl := range f.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.CONST {
-				continue
-			}
-			var exprs []ast.Expr
-			typed := false
-			for iota, s := range gen.Specs {
-				vs := s.(*ast.ValueSpec)
-				if len(vs.Values) > 0 {
-					exprs = vs.Values
-					_, name, _ := qualified(vs.Type)
-					typed = vs.Type != nil && name == t.Name()
-				}
-				sp := spec{exprs: exprs, iota: iota, typed: typed}
-				for _, n := range vs.Names {
-					sp.names = append(sp.names, n.Name)
-				}
-				specs = append(specs, sp)
-			}
-		}
-	}
-	// Constants can refer to ones declared later, or in another file: each pass values
-	// what it can.
-	known := map[string]constant.Value{}
-	for progress := true; progress; {
-		progress = false
-		for _, s := range specs {
-			for i, name := range s.names {
-				if _, ok := known[name]; ok || name == "_" || i >= len(s.exprs) {
-					continue
-				}
-				if v, ok := evaluate(s.exprs[i], s.iota, known); ok {
-					known[name] = v
-					progress = true
-				}
-			}
-		}
-	}
+	c.Pkg = pkg
 	for _, s := range specs {
-		if !s.typed {
+		if s.typ != t.Name() {
 			continue
 		}
 		for _, name := range s.names {
@@ -156,6 +107,86 @@ func ReadConsts(t reflect.Type, srcs ...[]byte) (Consts, error) {
 		return c, fmt.Errorf("no constants of %s", t.Name())
 	}
 	return c, nil
+}
+
+// constSpec is a const spec as Go reads it: its names, the expressions it takes (its own,
+// or repeated from the spec before), its iota, and the type named where they were given.
+type constSpec struct {
+	names []string
+	exprs []ast.Expr
+	iota  int
+	typ   string
+	// own reports whether the spec gives its own expressions; block and at are its const
+	// declaration and its place there.
+	own   bool
+	block *ast.GenDecl
+	at    int
+}
+
+// constSpecs are the const specs of a package's files, and the constants' values.
+func constSpecs(srcs ...[]byte) (pkg string, specs []constSpec, known map[string]constant.Value, err error) {
+	for _, src := range srcs {
+		f, err := parser.ParseFile(token.NewFileSet(), "", src, parser.SkipObjectResolution)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		if pkg == "" {
+			pkg = f.Name.Name
+		}
+		specs = append(specs, fileConstSpecs(f)...)
+	}
+	return pkg, specs, constValues(specs), nil
+}
+
+// constValues are the values of the constants specs declare.
+func constValues(specs []constSpec) map[string]constant.Value {
+	// Constants can refer to ones declared later, or in another file: each pass values
+	// what it can.
+	known := map[string]constant.Value{}
+	for progress := true; progress; {
+		progress = false
+		for _, s := range specs {
+			for i, name := range s.names {
+				if _, ok := known[name]; ok || name == "_" || i >= len(s.exprs) {
+					continue
+				}
+				if v, ok := evaluate(s.exprs[i], s.iota, known); ok {
+					known[name] = v
+					progress = true
+				}
+			}
+		}
+	}
+	return known
+}
+
+func fileConstSpecs(f *ast.File) []constSpec {
+	var specs []constSpec
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		var exprs []ast.Expr
+		typ := ""
+		for iota, s := range gen.Specs {
+			vs := s.(*ast.ValueSpec)
+			own := len(vs.Values) > 0
+			if own {
+				exprs = vs.Values
+				typ = ""
+				if vs.Type != nil {
+					_, typ, _ = qualified(vs.Type)
+				}
+			}
+			sp := constSpec{exprs: exprs, iota: iota, typ: typ, own: own, block: gen, at: iota}
+			for _, n := range vs.Names {
+				sp.names = append(sp.names, n.Name)
+			}
+			specs = append(specs, sp)
+		}
+	}
+	return specs
 }
 
 // evaluate is a constant expression's value.

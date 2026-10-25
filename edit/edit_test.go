@@ -71,3 +71,28 @@ func TestWriteFileKeepsTheMode(t *testing.T) {
 		t.Errorf("wrote %q with mode %v", data, info.Mode())
 	}
 }
+
+// A save that fails partway puts back what it wrote.
+func TestWriteFilesPutsBack(t *testing.T) {
+	dir := t.TempDir()
+	a, made := filepath.Join(dir, "a.go"), filepath.Join(dir, "new.go")
+	os.WriteFile(a, []byte("a"), 0o644)
+	_, err := WriteFiles([]File{
+		{Path: a, Old: []byte("a"), Data: []byte("a2")},
+		{Path: made, Data: []byte("new")},
+		{Path: filepath.Join(dir, "missing", "b.go"), Old: []byte("b"), Data: []byte("b2")},
+	})
+	if err == nil {
+		t.Fatal("wrote a file in a directory that isn't there")
+	}
+	if data, _ := os.ReadFile(a); string(data) != "a" {
+		t.Errorf("a holds %q", data)
+	}
+	if _, err := os.Stat(made); err == nil {
+		t.Error("the new file is still there")
+	}
+	wrote, err := WriteFiles([]File{{Path: a, Old: []byte("a"), Data: []byte("a")}, {Path: made, Data: []byte("new")}})
+	if err != nil || len(wrote) != 1 || wrote[0] != made {
+		t.Errorf("wrote %v: %v", wrote, err)
+	}
+}

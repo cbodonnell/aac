@@ -71,6 +71,9 @@ type Lit[T any] struct {
 	Spelled map[string]Spelling
 	file    *File
 	exprs   map[string]ast.Expr
+	sp      Spellings
+	// name is the var read, "" for an expression.
+	name string
 }
 
 // Opaque are the paths whose values aren't spelled in a way the codec reads, sorted. Their
@@ -262,14 +265,16 @@ func ReadVar[T any](f *File, name string, built T, sp Spellings) (*Lit[T], error
 	if !ok {
 		return nil, fmt.Errorf("no var %s in the source", name)
 	}
-	return ReadExpr(f, e, built, sp), nil
+	l := ReadExpr(f, e, built, sp)
+	l.name = name
+	return l, nil
 }
 
 // ReadExpr decodes an expression of a parsed file into a T, as Read does a var's, for a
 // literal no var holds alone (one passed to a function). A T that is an interface is read
 // as the concrete type the literal names (Spellings.Types), or else as built's.
 func ReadExpr[T any](f *File, e ast.Expr, built T, sp Spellings) *Lit[T] {
-	l := &Lit[T]{Spelled: map[string]Spelling{}, file: f, exprs: map[string]ast.Expr{}}
+	l := &Lit[T]{Spelled: map[string]Spelling{}, file: f, exprs: map[string]ast.Expr{}, sp: sp}
 	d := &decoder{file: f, sp: sp, spelled: l.Spelled, exprs: l.exprs}
 	t := reflect.TypeFor[T]()
 	b := reflect.ValueOf(&built).Elem()

@@ -52,7 +52,7 @@ type Shelf struct {
 }
 
 // colorConsts are Color's constants, as a package's source declares them.
-const colorSrc = `package shop
+const colorSrc = `package golit
 
 type Color uint8
 
@@ -65,7 +65,7 @@ const (
 const colorLast = ColorGreen
 `
 
-const flagSrc = `package shop
+const flagSrc = `package golit
 
 type Flag uint8
 
@@ -76,7 +76,7 @@ const (
 )
 `
 
-const shelfSrc = `package shop
+const shelfSrc = `package golit
 
 import "image"
 
@@ -130,7 +130,7 @@ func spellings(t *testing.T) Spellings {
 			"double": {Func: double, Label: "double", Args: []string{"n"}},
 			"price":  {Func: price, Label: "price", Args: []string{"name"}},
 		},
-		Types: map[string]reflect.Type{"Note": reflect.TypeFor[Note]()},
+		Types: map[string]reflect.Type{"Note": reflect.TypeFor[Note](), "Key": reflect.TypeFor[Key]()},
 	}
 }
 
@@ -226,7 +226,7 @@ func TestReadOpaqueWithoutTheBuild(t *testing.T) {
 
 // A helper that fails, by panicking, or a call with an argument that isn't read, is opaque.
 func TestReadCallsThatFail(t *testing.T) {
-	src := `package shop
+	src := `package golit
 
 var items = []Item{
 	{Price: price("")},
@@ -252,7 +252,7 @@ var items = []Item{
 
 // A registered type names what a literal in an interface is.
 func TestReadInterfaceOfARegisteredType(t *testing.T) {
-	src := `package shop
+	src := `package golit
 
 var extras = []any{Note{"a"}, &Item{Name: "b"}, nil, 3}
 `
@@ -273,11 +273,11 @@ var extras = []any{Note{"a"}, &Item{Name: "b"}, nil, 3}
 func TestReadQualifiedConsts(t *testing.T) {
 	src := `package other
 
-import "shop"
+import "golit"
 
-var colors = map[shop.Color]shop.Color{
-	shop.ColorRed: shop.ColorBlue,
-	ColorBlue:     shop.ColorGreen,
+var colors = map[golit.Color]golit.Color{
+	golit.ColorRed: golit.ColorBlue,
+	ColorBlue:     golit.ColorGreen,
 }
 `
 	l, err := Read[map[Color]Color]([]byte(src), "colors", nil, spellings(t))
@@ -290,7 +290,7 @@ var colors = map[shop.Color]shop.Color{
 	}
 	src = `package other
 
-var colors = map[shop.Color]shop.Color{shop.ColorRed: shop.ColorBlue}
+var colors = map[golit.Color]golit.Color{golit.ColorRed: golit.ColorBlue}
 `
 	l, err = Read[map[Color]Color]([]byte(src), "colors", nil, spellings(t))
 	if err != nil {
@@ -303,7 +303,7 @@ var colors = map[shop.Color]shop.Color{shop.ColorRed: shop.ColorBlue}
 
 // A literal passed to a function reads into an interface as the build's type.
 func TestReadExprOfAnInterface(t *testing.T) {
-	src := `package shop
+	src := `package golit
 
 var all = build([]Key{{"a", 1}, {Role: "b"}})
 `
@@ -322,7 +322,7 @@ var all = build([]Key{{"a", 1}, {Role: "b"}})
 }
 
 func TestReadConsts(t *testing.T) {
-	other := `package shop
+	other := `package golit
 
 const ColorLast Color = colorLast + 0
 
@@ -336,7 +336,7 @@ const (
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Pkg != "shop" {
+	if c.Pkg != "golit" {
 		t.Errorf("package %q", c.Pkg)
 	}
 	if got := c.Names(); !slices.Equal(got, []string{"ColorRed", "ColorBlue", "ColorGreen", "ColorLast", "ColorFour"}) {

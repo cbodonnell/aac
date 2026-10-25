@@ -3,6 +3,7 @@
 package edit
 
 import (
+	"bytes"
 	"errors"
 	"go/ast"
 	"go/format"
@@ -169,4 +170,45 @@ func WriteNew(path string, data []byte) error {
 	}
 	// A hard link fails, where a rename wouldn't, if the file appeared meanwhile.
 	return os.Link(tmp.Name(), path)
+}
+
+// File is a file a save writes: its path, what it held when loaded, nil for a file that
+// mustn't be there yet, and its new data.
+type File struct {
+	Path      string
+	Old, Data []byte
+}
+
+// WriteFiles writes the files whose data changed, in order, and reports the paths
+// written. If a write fails, the files already written are put back as they were, and new
+// ones removed.
+func WriteFiles(files []File) ([]string, error) {
+	var wrote []File
+	for _, f := range files {
+		var err error
+		switch {
+		case f.Old == nil:
+			err = WriteNew(f.Path, f.Data)
+		case bytes.Equal(f.Old, f.Data):
+			continue
+		default:
+			err = WriteFile(f.Path, f.Data)
+		}
+		if err != nil {
+			for _, w := range slices.Backward(wrote) {
+				if w.Old == nil {
+					os.Remove(w.Path)
+				} else {
+					WriteFile(w.Path, w.Old)
+				}
+			}
+			return nil, err
+		}
+		wrote = append(wrote, f)
+	}
+	paths := make([]string, len(wrote))
+	for i, f := range wrote {
+		paths[i] = f.Path
+	}
+	return paths, nil
 }
