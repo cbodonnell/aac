@@ -8,6 +8,7 @@ import (
 	"go/constant"
 	"go/token"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -100,6 +101,63 @@ func AppendConst(src []byte, typ, name string) ([]byte, error) {
 		}
 	}
 	return out, nil
+}
+
+// RemoveConst is a file's source without a constant, the undoing of AppendConst: its line
+// in a const block, or its const declaration, with the comment on it. It refuses a
+// constant declared with others on its line, and one whose going changes another's value,
+// as taking one from the middle of an iota block would.
+func RemoveConst(src []byte, name string) ([]byte, error) {
+	f, err := Parse(src)
+	if err != nil {
+		return nil, err
+	}
+	before := constValues(fileConstSpecs(f.AST))
+	for _, decl := range f.AST.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs := spec.(*ast.ValueSpec)
+			if !slices.ContainsFunc(vs.Names, func(n *ast.Ident) bool { return n.Name == name }) {
+				continue
+			}
+			if len(vs.Names) != 1 {
+				return nil, fmt.Errorf("%s is declared with others", name)
+			}
+			var n ast.Node = vs
+			doc := vs.Doc
+			if !gen.Lparen.IsValid() {
+				n, doc = gen, gen.Doc
+			}
+			from := edit.Offset(f.Fset, n.Pos())
+			if doc != nil {
+				from = edit.Offset(f.Fset, doc.Pos())
+			}
+			from = bytes.LastIndexByte(src[:from], '\n') + 1
+			to := len(src)
+			if nl := bytes.IndexByte(src[edit.Offset(f.Fset, n.End()):], '\n'); nl >= 0 {
+				to = edit.Offset(f.Fset, n.End()) + nl + 1
+			}
+			out, err := edit.Apply(src, []edit.Splice{{From: from, To: to}})
+			if err != nil {
+				return nil, err
+			}
+			back, err := Parse(out)
+			if err != nil || declared(back.AST, name) {
+				return nil, fmt.Errorf("%s is still declared", name)
+			}
+			after := constValues(fileConstSpecs(back.AST))
+			for n, v := range before {
+				if w, ok := after[n]; n != name && (!ok || !constant.Compare(v, token.EQL, w)) {
+					return nil, fmt.Errorf("removing %s changes %s", name, n)
+				}
+			}
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("no constant %s", name)
 }
 
 // declared reports whether a file declares a name at its top level.

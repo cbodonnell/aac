@@ -193,6 +193,50 @@ func TestWriteEdits(t *testing.T) {
 	}
 }
 
+// A call respelled with another argument has that argument written over, and its layout,
+// comments and other arguments kept.
+func TestWriteKeepsACallsLayout(t *testing.T) {
+	src := `package golit
+
+var items = []Item{
+	{
+		Name: "rug",
+		Rule: between(
+			1, // the least
+			9,
+		),
+	},
+}
+`
+	sp := spellings(t)
+	sp.Helpers["between"] = Helper{Func: between, Label: "between", Args: []string{"lo", "hi"}}
+	l, err := Read([]byte(src), "items", []Item(nil), sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := slices.Clone(l.Value)
+	now[0].Rule = between(1, 12)
+	spelled := map[string]Spelling{"[0].Rule": {Kind: Call, Name: "between", Args: []any{1, 12}}}
+	out, back, err := l.Write(now, spelled, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Replace(src, "9,", "12,", 1); string(out) != want {
+		t.Errorf("written:\n%s\nwant:\n%s", out, want)
+	}
+	again, _, err := back.Write(l.Value, map[string]Spelling{"[0].Rule": l.Spelled["[0].Rule"]}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != src {
+		t.Errorf("written and undone, the source isn't as it was:\n%s", again)
+	}
+}
+
+func between(lo, hi int) func(int) int {
+	return func(x int) int { return max(lo, min(hi, x)) }
+}
+
 // A comment on an element's line goes with it, and one on a line of its own stays.
 func TestWriteRemovesComments(t *testing.T) {
 	src := `package golit
@@ -365,6 +409,35 @@ const Small Size = 2
 	}
 	if _, err := AppendConst([]byte("package golit\n\ntype Zone string\n\nconst ZoneA Zone = \"a\"\n"), "Zone", "ZoneB"); err == nil {
 		t.Error("numbered a string constant")
+	}
+}
+
+// RemoveConst undoes AppendConst, and refuses to renumber the constants after it.
+func TestRemoveConst(t *testing.T) {
+	added, err := AppendConst([]byte(colorSrc), "Color", "ColorGold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := RemoveConst(added, "ColorGold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != colorSrc {
+		t.Errorf("removed, the source is\n%s", out)
+	}
+	if _, err := RemoveConst([]byte(colorSrc), "ColorBlue"); err == nil {
+		t.Error("removed a constant from the middle of an iota block")
+	}
+	if _, err := RemoveConst([]byte(colorSrc), "ColorGold"); err == nil {
+		t.Error("removed a constant that isn't there")
+	}
+	single := "package golit\n\ntype Size int\n\nconst Small Size = 2\n"
+	added, err = AppendConst([]byte(single), "Size", "Large")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := RemoveConst(added, "Large"); err != nil || string(out) != single {
+		t.Errorf("removed a declaration of its own: %v\n%s", err, out)
 	}
 }
 

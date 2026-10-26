@@ -249,22 +249,9 @@ func (w *writer) spell(s Spelling, v reflect.Value, path string, indent int) (st
 		}
 		return s.Name, nil
 	case Call:
-		hex := w.sp.Helpers[s.Name].Hex
 		args := make([]string, len(s.Args))
 		for i, a := range s.Args {
-			av := reflect.ValueOf(a)
-			switch {
-			case !av.IsValid():
-				args[i] = "nil"
-				continue
-			case hex > 0 && av.CanUint():
-				args[i] = fmt.Sprintf("0x%0*x", hex, av.Uint())
-				continue
-			case hex > 0 && av.CanInt() && av.Int() >= 0:
-				args[i] = fmt.Sprintf("0x%0*x", hex, av.Int())
-				continue
-			}
-			text, err := w.format(av, path+"("+strconv.Itoa(i)+")", false, layout{}, indent)
+			text, err := w.arg(s.Name, a, path, i, indent)
 			if err != nil {
 				return "", err
 			}
@@ -278,6 +265,21 @@ func (w *writer) spell(s Spelling, v reflect.Value, path string, indent int) (st
 		return s.Source, nil
 	}
 	return w.plain(v, path, false, layout{}, indent)
+}
+
+// arg writes a helper call's i'th argument, a.
+func (w *writer) arg(helper string, a any, path string, i, indent int) (string, error) {
+	hex := w.sp.Helpers[helper].Hex
+	av := reflect.ValueOf(a)
+	switch {
+	case !av.IsValid():
+		return "nil", nil
+	case hex > 0 && av.CanUint():
+		return fmt.Sprintf("0x%0*x", hex, av.Uint()), nil
+	case hex > 0 && av.CanInt() && av.Int() >= 0:
+		return fmt.Sprintf("0x%0*x", hex, av.Int()), nil
+	}
+	return w.format(av, path+"("+strconv.Itoa(i)+")", false, layout{}, indent)
 }
 
 // plain writes a value as the codec writes it alone.

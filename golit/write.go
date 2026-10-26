@@ -25,7 +25,8 @@ import (
 // spelled gives how paths of now are spelled other than plainly; a Plain entry writes its
 // path plainly. A path it leaves out keeps the source's spelling, a var's, a call's or
 // opaque source, unless its value changed, and is otherwise written plainly, a constant by
-// its name.
+// its name. A call respelled as a call of the same helper with as many arguments has only
+// the arguments that changed written, so its layout and comments stay.
 //
 // origins gives, per list path of now, each element's index in the source's list, -1 for
 // one added; a list it leaves out keeps its elements by index. Elements kept are edited in
@@ -397,6 +398,9 @@ func (w *writer) walk(now, old reflect.Value, path, src string, e ast.Expr, inde
 		if sameSpelling(want, was) {
 			return nil
 		}
+		if w.respellArgs(e, want, was) {
+			return w.argSplices(e.(*ast.CallExpr), want, was, path)
+		}
 		return w.replace(e, now, path, indent)
 	case !explicit && spelledOtherwise:
 		if equal(now, old) {
@@ -429,6 +433,30 @@ func (w *writer) walk(now, old reflect.Value, path, src string, e ast.Expr, inde
 		return nil
 	}
 	return w.replace(e, now, path, indent)
+}
+
+// respellArgs reports whether a call respelled keeps its helper and its number of
+// arguments, so only the arguments that changed need writing.
+func (w *writer) respellArgs(e ast.Expr, want, was Spelling) bool {
+	call, ok := e.(*ast.CallExpr)
+	return ok && want.Kind == Call && was.Kind == Call && want.Name == was.Name && !call.Ellipsis.IsValid() &&
+		len(call.Args) == len(want.Args) && len(was.Args) == len(want.Args)
+}
+
+// argSplices write the arguments of a call that changed over their expressions, keeping
+// the call's layout, its comments and the rest of its arguments as written.
+func (w *writer) argSplices(call *ast.CallExpr, want, was Spelling, path string) error {
+	for i, a := range want.Args {
+		if reflect.DeepEqual(a, was.Args[i]) {
+			continue
+		}
+		text, err := w.arg(want.Name, a, path, i, w.indentAt(call.Args[i].Pos()))
+		if err != nil {
+			return err
+		}
+		w.splices = append(w.splices, edit.Replace(w.file.Fset, call.Args[i], text))
+	}
+	return nil
 }
 
 // replace writes a value over an expression.
