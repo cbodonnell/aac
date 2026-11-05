@@ -413,7 +413,7 @@ func (w *writer) composite(v reflect.Value, path string, lay layout, indent int)
 			items = append(items, text)
 		}
 		if !lay.inline && perLine(t.Elem()) {
-			lines = lines || t.Elem().Kind() == reflect.String || slices.ContainsFunc(items, composed)
+			lines = lines || t.Elem().Kind() == reflect.String || slices.ContainsFunc(items, w.composed)
 		}
 	case reflect.Map:
 		keys := v.MapKeys()
@@ -435,8 +435,11 @@ func (w *writer) composite(v reflect.Value, path string, lay layout, indent int)
 }
 
 // composed reports whether an element is written as a composite literal, not a name or a
-// call of names and numbers.
-func composed(text string) bool {
+// call of names and numbers; with Spellings.Inline, only one that spans lines counts.
+func (w *writer) composed(text string) bool {
+	if w.sp.Inline {
+		return strings.Contains(text, "\n")
+	}
 	return strings.ContainsAny(text, "{\n")
 }
 
@@ -469,6 +472,15 @@ func perLine(t reflect.Type) bool {
 		return true
 	}
 	return false
+}
+
+// perLine reports whether elements added to an empty list of t go one a line: strings
+// always, and composite values unless Spellings.Inline.
+func (w *writer) perLine(t reflect.Type) bool {
+	if w.sp.Inline && t.Kind() != reflect.String {
+		return false
+	}
+	return perLine(t)
 }
 
 // local reports whether a type is declared in the file's package.

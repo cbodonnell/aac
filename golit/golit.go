@@ -124,6 +124,16 @@ type Spellings struct {
 	// Types are the concrete types an interface may hold as a composite literal, by the
 	// name the literal is spelled with.
 	Types map[string]reflect.Type
+	// Inline writes a new list of composite values on one line when it fits, for a source
+	// that keeps short lists so; without it they go one a line. Strings go one a line
+	// either way.
+	Inline bool
+	// Declared adds fields to a literal spanning lines in the order the struct declares
+	// them, as to one on a line: on a line of their own before the first field kept that
+	// the struct declares after, or at the end. Without it, a field on one line goes before
+	// a last field spanning lines (a list closing the literal), and one spanning lines after
+	// the last field that does.
+	Declared bool
 }
 
 // Helper is a function a literal calls to make a value.

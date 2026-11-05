@@ -33,13 +33,15 @@ import (
 // place, elements gone take their lines and comments, and elements added go after the
 // kept element before them, or first, in their siblings' style: one a line or inline, and
 // structs by position when theirs are. Kept elements in another order than the source's
-// trade places, each with its own edits.
+// trade places, each with its own edits. In a literal that closes on its last element's
+// line (}}) they go inline, so it still does, and in a list written several to a line,
+// into the row they fall in.
 //
 // A field that changes to its zero value goes. One that changes from it is added in the
 // order the struct declares it in a literal on one line, so a field taken out and put back
 // is where it was; in one that spans lines, before the last field when that spans lines
 // (the list closing a struct) and otherwise at the end, or, when it spans lines itself,
-// after the last field that does too. Map entries are matched by key, and new ones appended in sorted order.
+// after the last field that does too (Spellings.Declared keeps the order declared there too). Map entries are matched by key, and new ones appended in sorted order.
 // Packages written that the file doesn't import are imported.
 func (l *Lit[T]) Splices(now T, spelled map[string]Spelling, origins map[string][]int) ([]edit.Splice, error) {
 	w, err := l.splices(now, spelled, origins)
@@ -540,13 +542,15 @@ func (w *writer) structLit(lit *ast.CompositeLit, now, old reflect.Value, path, 
 	if len(adds) == 0 {
 		return nil
 	}
-	if !w.spansLines(lit) || len(lit.Elts) == 0 {
-		// In the order declared: before the first field kept that the struct declares after.
+	if !w.spansLines(lit) || len(lit.Elts) == 0 || w.hugs(lit) || w.sp.Declared {
+		// In the order declared: before the first field kept that the struct declares after,
+		// on a line of its own when that starts its line in a literal spanning lines.
+		lines := w.spansLines(lit) && !w.hugs(lit)
 		var anchor ast.Expr
 		var items []string
 		flush := func() {
 			if len(items) > 0 {
-				w.splices = append(w.splices, w.insert(lit, anchor, items, false)...)
+				w.splices = append(w.splices, w.insert(lit, anchor, items, lines && (anchor == nil || w.startsLine(anchor)))...)
 			}
 			items = nil
 		}
@@ -646,7 +650,11 @@ func (w *writer) listLit(lit *ast.CompositeLit, now, old reflect.Value, path, sr
 		}
 	}
 	lay := w.siblings(elts, now.Type().Elem())
-	perLine := w.spansLines(lit) || (len(elts) == 0 && perLine(now.Type().Elem()))
+	if w.hugs(lit) {
+		// Its elements span lines for what is in them, not as a style.
+		lay.lines, lay.inline = false, false
+	}
+	perLine := w.spansLines(lit) && !w.hugs(lit) && !w.rows(lit) || len(elts) == 0 && w.perLine(now.Type().Elem())
 	// Elements added go before the kept element after them, in order.
 	var anchor ast.Expr
 	var items []string
@@ -771,6 +779,38 @@ func (w *writer) mapLit(lit *ast.CompositeLit, now, old reflect.Value, path, src
 // spansLines reports whether a node starts and ends on different lines.
 func (w *writer) spansLines(n ast.Node) bool {
 	return w.file.Fset.Position(n.Pos()).Line != w.file.Fset.Position(n.End()).Line
+}
+
+// hugs reports whether a literal spanning lines closes on the line its last element ends
+// on, as a list of one struct spanning lines does (}}). What is added to it goes inline,
+// so it still does, and taken out again leaves it as it was.
+func (w *writer) hugs(lit *ast.CompositeLit) bool {
+	if len(lit.Elts) == 0 || !w.spansLines(lit) {
+		return false
+	}
+	last := lit.Elts[len(lit.Elts)-1]
+	return w.file.Fset.Position(last.End()).Line == w.file.Fset.Position(lit.Rbrace).Line
+}
+
+// rows reports whether a literal spanning lines writes its elements several to a line, so
+// what is added to it goes into the row it falls in.
+func (w *writer) rows(lit *ast.CompositeLit) bool {
+	if !w.spansLines(lit) {
+		return false
+	}
+	for i := 1; i < len(lit.Elts); i++ {
+		if w.file.Fset.Position(lit.Elts[i].Pos()).Line == w.file.Fset.Position(lit.Elts[i-1].End()).Line {
+			return true
+		}
+	}
+	return false
+}
+
+// startsLine reports whether a node is the first thing on its line.
+func (w *writer) startsLine(n ast.Node) bool {
+	at := edit.Offset(w.file.Fset, n.Pos())
+	start := bytes.LastIndexByte(w.file.Src[:at], '\n') + 1
+	return strings.TrimSpace(string(w.file.Src[start:at])) == ""
 }
 
 // indentAt is the columns a line's indentation takes.

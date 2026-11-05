@@ -10,6 +10,7 @@ so an edit made in the tool and one made by hand are the same kind of diff.
   how each part is spelled: named constants (read from their package's source), registered
   vars, calls of registered helpers, and anything else as opaque, its value the build's.
   It writes a changed value back as splices of only what changed, in the style of what
-  is around it, read back before it is kept (several literals of a file at once), copies
+  is around it (one a line, in rows, inline, or closing on the last element's line; new
+  lists inline and fields in declared order when a source keeps them so), read back before it is kept (several literals of a file at once), copies
   an element with edits for a new one made from it, formats new literals, and declares
   constants, vars and entries in other files' tables.
