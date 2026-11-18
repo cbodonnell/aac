@@ -114,3 +114,17 @@ func TestWriteInline(t *testing.T) {
 		t.Errorf("formatted with Inline, strings inline: %s: %v", text, err)
 	}
 }
+
+// A new struct spanning lines for the list it ends with closes on that list's last line
+// with Hug.
+func TestWriteHug(t *testing.T) {
+	v := Lot{Label: "a", N: 3, Lines: []string{"x", "y"}}
+	text, _, err := Format(v, "golit", Spellings{}, nil)
+	if err != nil || !strings.HasPrefix(text, "Lot{\n") {
+		t.Errorf("formatted %s: %v", text, err)
+	}
+	text, _, err = Format(v, "golit", Spellings{Hug: true}, nil)
+	if err != nil || !strings.Contains(text, `Lot{Label: "a", N: 3, Lines: []string{`+"\n") || !strings.HasSuffix(text, "}}") {
+		t.Errorf("formatted with Hug %s: %v", text, err)
+	}
+}

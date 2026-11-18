@@ -134,6 +134,10 @@ type Spellings struct {
 	// a last field spanning lines (a list closing the literal), and one spanning lines after
 	// the last field that does.
 	Declared bool
+	// Hug writes a new struct that doesn't fit on a line, but for the list of composite
+	// values or strings it ends with, closing on that list's last line, as gofmt'ed
+	// sources often do: T{A: 1, B: []U{ one a line }}.
+	Hug bool
 }
 
 // Helper is a function a literal calls to make a value.

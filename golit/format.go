@@ -385,6 +385,8 @@ func (w *writer) composite(v reflect.Value, path string, lay layout, indent int)
 	lines := lay.lines
 	switch t.Kind() {
 	case reflect.Struct:
+		var last reflect.Value
+		var lastPath, lastName string
 		for i := range t.NumField() {
 			sf := t.Field(i)
 			fv := fieldOf(v, i)
@@ -403,6 +405,12 @@ func (w *writer) composite(v reflect.Value, path string, lay layout, indent int)
 				text = sf.Name + ": " + text
 			}
 			items = append(items, text)
+			last, lastPath, lastName = fv, fpath, sf.Name
+		}
+		if w.sp.Hug && !lines && !lay.positional {
+			if text, ok, err := w.hug(items, last, lastPath, lastName, indent); ok || err != nil {
+				return text, err
+			}
 		}
 	case reflect.Slice, reflect.Array:
 		for i := range v.Len() {
@@ -432,6 +440,32 @@ func (w *writer) composite(v reflect.Value, path string, lay layout, indent int)
 		lines = lines || (!lay.inline && len(items) > 0)
 	}
 	return block(items, lines, indent), nil
+}
+
+// hug writes a struct's fields, items, that don't fit on a line so it closes on the line
+// of its last field, a list spanning lines, when the rest fits on the line it opens:
+// {A: 1, B: []U{ ... }}.
+func (w *writer) hug(items []string, last reflect.Value, path, name string, indent int) (string, bool, error) {
+	n := len(items)
+	if n == 0 || fits("{"+strings.Join(items, ", ")+"}", indent) ||
+		slices.ContainsFunc(items[:n-1], func(s string) bool { return strings.Contains(s, "\n") }) {
+		return "", false, nil
+	}
+	if k := last.Kind(); (k != reflect.Slice && k != reflect.Array) || last.Len() == 0 || !perLine(last.Type().Elem()) {
+		return "", false, nil
+	}
+	if s, ok := w.spelled[path]; ok && s.Kind != Plain {
+		return "", false, nil
+	}
+	text, err := w.format(last, path, false, layout{lines: true}, indent)
+	if err != nil {
+		return "", false, err
+	}
+	out := "{" + strings.Join(append(slices.Clone(items[:n-1]), name+": "+text), ", ") + "}"
+	if first, _, _ := strings.Cut(out, "\n"); !fits(first, indent) {
+		return "", false, nil
+	}
+	return out, true, nil
 }
 
 // composed reports whether an element is written as a composite literal, not a name or a
